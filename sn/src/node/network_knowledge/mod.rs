@@ -7,6 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 mod elder_candidates;
+mod membership;
 mod section_peers;
 
 pub(super) mod node_state;
