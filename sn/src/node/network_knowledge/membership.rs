@@ -2,62 +2,41 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bls_dkg::{PublicKeySet, SecretKeyShare};
 use core::fmt::Debug;
-use serde::{Deserialize, Serialize};
+use xor_name::XorName;
 
 use sn_membership::consensus::{Consensus, VoteResponse};
-use sn_membership::vote::{Ballot, Proposition, SignedVote, Vote};
+use sn_membership::vote::{Ballot, SignedVote, Vote};
 use sn_membership::{Error, NodeId, Result};
+
+use crate::messaging::system::{MembershipState, NodeState};
 
 const SOFT_MAX_MEMBERS: usize = 21;
 pub type Generation = u64;
 
 #[derive(Debug)]
-pub struct Membership<T: Proposition> {
-    pub consensus: Consensus<Reconfig<T>>,
+pub struct Membership {
+    pub consensus: Consensus<NodeState>,
+    pub bootstrap_members: BTreeSet<NodeState>,
     pub gen: Generation,
-    pub forced_reconfigs: BTreeMap<Generation, BTreeSet<Reconfig<T>>>,
-    pub history: BTreeMap<Generation, Consensus<Reconfig<T>>>,
+    pub history: BTreeMap<Generation, Consensus<NodeState>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Reconfig<T: Proposition> {
-    Join(T),
-    Leave(T),
-}
-
-impl<T: Proposition> Debug for Reconfig<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Reconfig::Join(a) => write!(f, "J{:?}", a),
-            Reconfig::Leave(a) => write!(f, "L{:?}", a),
-        }
-    }
-}
-
-impl<T: Proposition> Reconfig<T> {
-    fn apply(&self, members: &mut BTreeSet<T>) {
-        match self {
-            Reconfig::Join(p) => members.insert(p.clone()),
-            Reconfig::Leave(p) => members.remove(p),
-        };
-    }
-}
-
-impl<T: Proposition> Membership<T> {
+impl Membership {
     pub fn from(
         secret_key: (NodeId, SecretKeyShare),
         elders: PublicKeySet,
         n_elders: usize,
+        bootstrap_members: BTreeSet<NodeState>,
     ) -> Self {
         Membership {
             consensus: Consensus::from(secret_key, elders, n_elders),
+            bootstrap_members,
             gen: 0,
-            forced_reconfigs: Default::default(),
             history: BTreeMap::default(),
         }
     }
 
-    pub fn consensus_at_gen(&self, gen: Generation) -> Result<&Consensus<Reconfig<T>>> {
+    pub fn consensus_at_gen(&self, gen: Generation) -> Result<&Consensus<NodeState>> {
         if gen == self.gen + 1 {
             Ok(&self.consensus)
         } else {
@@ -68,7 +47,7 @@ impl<T: Proposition> Membership<T> {
         }
     }
 
-    pub fn consensus_at_gen_mut(&mut self, gen: Generation) -> Result<&mut Consensus<Reconfig<T>>> {
+    pub fn consensus_at_gen_mut(&mut self, gen: Generation) -> Result<&mut Consensus<NodeState>> {
         if gen == self.gen + 1 {
             Ok(&mut self.consensus)
         } else {
@@ -79,44 +58,15 @@ impl<T: Proposition> Membership<T> {
         }
     }
 
-    pub fn force_join(&mut self, actor: T) {
-        let forced_reconfigs = self.forced_reconfigs.entry(self.gen).or_default();
-
-        // remove any leave reconfigs for this actor
-        forced_reconfigs.remove(&Reconfig::Leave(actor.clone()));
-        forced_reconfigs.insert(Reconfig::Join(actor));
-    }
-
-    pub fn force_leave(&mut self, actor: T) {
-        let forced_reconfigs = self.forced_reconfigs.entry(self.gen).or_default();
-
-        // remove any leave reconfigs for this actor
-        forced_reconfigs.remove(&Reconfig::Join(actor.clone()));
-        forced_reconfigs.insert(Reconfig::Leave(actor));
-    }
-
-    pub fn members(&self, gen: Generation) -> Result<BTreeSet<T>> {
-        let mut members = BTreeSet::new();
-
-        self.forced_reconfigs
-            .get(&0) // forced reconfigs at generation 0
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .for_each(|r| r.apply(&mut members));
+    pub fn section_member_states(&self, gen: Generation) -> Result<BTreeMap<XorName, NodeState>> {
+        let mut members =
+            BTreeMap::from_iter(self.bootstrap_members.iter().cloned().map(|n| (n.name, n)));
 
         if gen == 0 {
             return Ok(members);
         }
 
         for (history_gen, consensus) in self.history.iter() {
-            self.forced_reconfigs
-                .get(history_gen)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .for_each(|r| r.apply(&mut members));
-
             let decision = if let Some(decision) = consensus.decision.as_ref() {
                 decision
             } else {
@@ -126,8 +76,8 @@ impl<T: Proposition> Membership<T> {
                 );
             };
 
-            for (reconfig, _sig) in decision.proposals.iter() {
-                reconfig.apply(&mut members);
+            for (node_state, _sig) in decision.proposals.iter() {
+                members.insert(node_state.name, node_state.clone());
             }
 
             if history_gen == &gen {
@@ -138,11 +88,11 @@ impl<T: Proposition> Membership<T> {
         Err(Error::InvalidGeneration(gen))
     }
 
-    pub fn propose(&mut self, reconfig: Reconfig<T>) -> Result<SignedVote<Reconfig<T>>> {
-        info!("[{}] proposing {:?}", self.id(), reconfig);
+    pub fn propose(&mut self, node_state: NodeState) -> Result<SignedVote<NodeState>> {
+        info!("[{}] proposing {:?}", self.id(), node_state);
         let vote = Vote {
             gen: self.gen + 1,
-            ballot: Ballot::Propose(reconfig),
+            ballot: Ballot::Propose(node_state),
             faults: self.consensus.faults(),
         };
         let signed_vote = self.sign_vote(vote)?;
@@ -153,7 +103,7 @@ impl<T: Proposition> Membership<T> {
         self.cast_vote(signed_vote)
     }
 
-    pub fn anti_entropy(&self, from_gen: Generation) -> Result<Vec<SignedVote<Reconfig<T>>>> {
+    pub fn anti_entropy(&self, from_gen: Generation) -> Result<Vec<SignedVote<NodeState>>> {
         info!("[MBR] anti-entropy from gen {}", from_gen);
 
         let mut msgs = self
@@ -178,8 +128,8 @@ impl<T: Proposition> Membership<T> {
 
     pub fn handle_signed_vote(
         &mut self,
-        signed_vote: SignedVote<Reconfig<T>>,
-    ) -> Result<VoteResponse<Reconfig<T>>> {
+        signed_vote: SignedVote<NodeState>,
+    ) -> Result<VoteResponse<NodeState>> {
         self.validate_proposals(&signed_vote)?;
 
         let vote_gen = signed_vote.vote.gen;
@@ -202,33 +152,33 @@ impl<T: Proposition> Membership<T> {
         Ok(vote_response)
     }
 
-    pub fn sign_vote(&self, vote: Vote<Reconfig<T>>) -> Result<SignedVote<Reconfig<T>>> {
+    pub fn sign_vote(&self, vote: Vote<NodeState>) -> Result<SignedVote<NodeState>> {
         self.consensus.sign_vote(vote)
     }
 
     pub fn cast_vote(
         &mut self,
-        signed_vote: SignedVote<Reconfig<T>>,
-    ) -> Result<SignedVote<Reconfig<T>>> {
+        signed_vote: SignedVote<NodeState>,
+    ) -> Result<SignedVote<NodeState>> {
         self.consensus.cast_vote(signed_vote)
     }
 
-    pub fn validate_proposals(&self, signed_vote: &SignedVote<Reconfig<T>>) -> Result<()> {
+    pub fn validate_proposals(&self, signed_vote: &SignedVote<NodeState>) -> Result<()> {
         // ensure we have a consensus instance for this votes generations
         let _ = self.consensus_at_gen(signed_vote.vote.gen)?;
 
         signed_vote
             .proposals()
             .into_iter()
-            .try_for_each(|reconfig| self.validate_reconfig(reconfig, signed_vote.vote.gen))
+            .try_for_each(|reconfig| self.validate_node_state(reconfig, signed_vote.vote.gen))
     }
 
-    pub fn validate_reconfig(&self, reconfig: Reconfig<T>, gen: Generation) -> Result<()> {
+    pub fn validate_node_state(&self, node_state: NodeState, gen: Generation) -> Result<()> {
         assert!(gen > 0);
-        let members = self.members(gen - 1)?;
-        match reconfig {
-            Reconfig::Join(actor) => {
-                if members.contains(&actor) {
+        let members = self.section_member_states(gen - 1)?;
+        match node_state.state {
+            MembershipState::Joined => {
+                if members.contains_key(&node_state.name) {
                     Err(Error::JoinRequestForExistingMember)
                 } else if members.len() >= SOFT_MAX_MEMBERS {
                     Err(Error::MembersAtCapacity)
@@ -236,11 +186,15 @@ impl<T: Proposition> Membership<T> {
                     Ok(())
                 }
             }
-            Reconfig::Leave(actor) => {
-                if !members.contains(&actor) {
-                    Err(Error::LeaveRequestForNonMember)
+            MembershipState::Left | MembershipState::Relocated(_) => {
+                if let Some(prev_state) = members.get(&node_state.name) {
+                    if prev_state.state == MembershipState::Joined {
+                        Ok(())
+                    } else {
+                        Err(Error::LeaveRequestForNonMember) // TODO: change this error response
+                    }
                 } else {
-                    Ok(())
+                    Err(Error::LeaveRequestForNonMember)
                 }
             }
         }
