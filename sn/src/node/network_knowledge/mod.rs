@@ -7,7 +7,6 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 mod elder_candidates;
-mod membership;
 mod section_peers;
 
 pub(super) mod node_state;
@@ -17,7 +16,6 @@ pub(super) mod section_keys;
 #[cfg(test)]
 pub(crate) use self::section_authority_provider::test_utils;
 
-pub(crate) use self::membership::Membership;
 pub(super) use self::section_keys::{SectionKeyShare, SectionKeysProvider};
 
 pub(crate) use elder_candidates::ElderCandidates;
@@ -48,8 +46,6 @@ pub(crate) struct NetworkKnowledge {
     signed_sap: Arc<RwLock<SectionAuth<SectionAuthorityProvider>>>,
     /// Members of our section
     section_peers: SectionPeers,
-    /// Members of our section
-    membership: Option<Membership>,
     /// The network prefix map, i.e. a map from prefix to SAPs
     prefix_map: NetworkPrefixMap,
     /// A DAG containing all section chains of the whole network that we are aware of
@@ -66,7 +62,6 @@ impl NetworkKnowledge {
         chain: SecuredLinkedList,
         signed_sap: SectionAuth<SectionAuthorityProvider>,
         passed_prefix_map: Option<NetworkPrefixMap>,
-        membership: Option<Membership>,
     ) -> Result<Self, Error> {
         // Let's check the section chain's genesis key matches ours.
         if genesis_key != *chain.root_key() {
@@ -134,7 +129,6 @@ impl NetworkKnowledge {
             chain: Arc::new(RwLock::new(chain.clone())),
             signed_sap: Arc::new(RwLock::new(signed_sap)),
             section_peers: SectionPeers::default(),
-            membership,
             prefix_map,
             all_sections_chains: Arc::new(RwLock::new(chain)),
         })
@@ -180,12 +174,6 @@ impl NetworkKnowledge {
             SecuredLinkedList::new(genesis_key),
             section_auth,
             None,
-            Some(Membership::from(
-                (secret_key_index, secret_key_share.clone()),
-                public_key_set.clone(),
-                num_genesis_nodes,
-                BTreeSet::new(),
-            )),
         )?;
 
         for peer in network_knowledge.signed_sap.read().await.elders().cloned() {

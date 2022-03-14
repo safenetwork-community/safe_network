@@ -29,6 +29,7 @@ use self::{data::DataStorage, split_barrier::SplitBarrier};
 use super::{
     api::cmds::Cmd,
     dkg::DkgVoter,
+    membership::Membership,
     network_knowledge::{NetworkKnowledge, SectionKeyShare, SectionKeysProvider},
     Elders, Event, NodeElderChange, NodeInfo,
 };
@@ -114,6 +115,7 @@ pub(crate) struct Node {
     dkg_voter: DkgVoter,
     relocate_state: Arc<RwLock<Option<Box<JoiningAsRelocated>>>>,
     // ======================== Elder only ========================
+    membership: Arc<RwLock<Option<Membership>>>,
     joins_allowed: Arc<RwLock<bool>>,
     current_joins_semaphore: Arc<Semaphore>,
     // Trackers
@@ -136,6 +138,31 @@ impl Node {
         used_space: UsedSpace,
         root_storage_dir: PathBuf,
     ) -> Result<Self> {
+        let membership = if let Some(key) = section_key_share.clone() {
+            let n_elders = network_knowledge
+                .section_signed_authority_provider()
+                .await
+                .elder_count();
+
+            // TODO: the bootstrap members should come from handover
+            let bootstrap_members = BTreeSet::from_iter(
+                network_knowledge
+                    .section_signed_members()
+                    .await
+                    .into_iter()
+                    .map(|section_auth| section_auth.value.to_msg()),
+            );
+
+            Some(Membership::from(
+                (key.index as u8, key.secret_key_share),
+                key.public_key_set,
+                n_elders,
+                bootstrap_members,
+            ))
+        } else {
+            None
+        };
+
         let section_keys_provider = SectionKeysProvider::new(section_key_share).await;
 
         // make sure the Node has the correct local addr as Comm
@@ -174,6 +201,7 @@ impl Node {
             liveness: adult_liveness,
             pending_data_queries: Arc::new(Cache::with_expiry_duration(DATA_QUERY_TIMEOUT)),
             ae_backoff_cache: AeBackoffCache::default(),
+            membership: Arc::new(RwLock::new(membership)),
         })
     }
 
