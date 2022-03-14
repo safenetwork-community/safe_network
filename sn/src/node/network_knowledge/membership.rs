@@ -13,12 +13,12 @@ use crate::messaging::system::{MembershipState, NodeState};
 const SOFT_MAX_MEMBERS: usize = 21;
 pub type Generation = u64;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Membership {
-    pub consensus: Consensus<NodeState>,
-    pub bootstrap_members: BTreeSet<NodeState>,
-    pub gen: Generation,
-    pub history: BTreeMap<Generation, Consensus<NodeState>>,
+    consensus: Consensus<NodeState>,
+    bootstrap_members: BTreeSet<NodeState>,
+    gen: Generation,
+    history: BTreeMap<Generation, Consensus<NodeState>>,
 }
 
 impl Membership {

@@ -204,6 +204,7 @@ impl<'a> Join<'a> {
                         section_chain,
                         section_auth,
                         Some(self.prefix_map),
+                        None,
                     )?;
 
                     return Ok((self.node, network_knowledge));

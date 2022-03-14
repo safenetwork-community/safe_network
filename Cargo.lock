@@ -3906,8 +3906,6 @@ dependencies = [
 [[package]]
 name = "sn_membership"
 version = "1.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "899ac9479b58aa0042a85e1f4c3612f7303b183a2714168a6900657f72a704ca"
 dependencies = [
  "bincode",
  "blsttc",
