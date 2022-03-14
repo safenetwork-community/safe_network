@@ -11,10 +11,10 @@ use sn_membership::{Error, NodeId, Result};
 use crate::messaging::system::{MembershipState, NodeState};
 
 const SOFT_MAX_MEMBERS: usize = 21;
-pub type Generation = u64;
+type Generation = u64;
 
 #[derive(Debug, Clone)]
-pub struct Membership {
+pub(crate) struct Membership {
     consensus: Consensus<NodeState>,
     bootstrap_members: BTreeSet<NodeState>,
     gen: Generation,
@@ -22,7 +22,7 @@ pub struct Membership {
 }
 
 impl Membership {
-    pub fn from(
+    pub(crate) fn from(
         secret_key: (NodeId, SecretKeyShare),
         elders: PublicKeySet,
         n_elders: usize,
@@ -36,7 +36,7 @@ impl Membership {
         }
     }
 
-    pub fn consensus_at_gen(&self, gen: Generation) -> Result<&Consensus<NodeState>> {
+    fn consensus_at_gen(&self, gen: Generation) -> Result<&Consensus<NodeState>> {
         if gen == self.gen + 1 {
             Ok(&self.consensus)
         } else {
@@ -47,7 +47,7 @@ impl Membership {
         }
     }
 
-    pub fn consensus_at_gen_mut(&mut self, gen: Generation) -> Result<&mut Consensus<NodeState>> {
+    fn consensus_at_gen_mut(&mut self, gen: Generation) -> Result<&mut Consensus<NodeState>> {
         if gen == self.gen + 1 {
             Ok(&mut self.consensus)
         } else {
@@ -58,7 +58,10 @@ impl Membership {
         }
     }
 
-    pub fn section_member_states(&self, gen: Generation) -> Result<BTreeMap<XorName, NodeState>> {
+    pub(crate) fn section_node_states(
+        &self,
+        gen: Generation,
+    ) -> Result<BTreeMap<XorName, NodeState>> {
         let mut members =
             BTreeMap::from_iter(self.bootstrap_members.iter().cloned().map(|n| (n.name, n)));
 
@@ -77,7 +80,7 @@ impl Membership {
             };
 
             for (node_state, _sig) in decision.proposals.iter() {
-                members.insert(node_state.name, node_state.clone());
+                let _ = members.insert(node_state.name, node_state.clone());
             }
 
             if history_gen == &gen {
@@ -88,7 +91,7 @@ impl Membership {
         Err(Error::InvalidGeneration(gen))
     }
 
-    pub fn propose(&mut self, node_state: NodeState) -> Result<SignedVote<NodeState>> {
+    pub(crate) fn propose(&mut self, node_state: NodeState) -> Result<SignedVote<NodeState>> {
         info!("[{}] proposing {:?}", self.id(), node_state);
         let vote = Vote {
             gen: self.gen + 1,
@@ -103,7 +106,7 @@ impl Membership {
         self.cast_vote(signed_vote)
     }
 
-    pub fn anti_entropy(&self, from_gen: Generation) -> Result<Vec<SignedVote<NodeState>>> {
+    pub(crate) fn anti_entropy(&self, from_gen: Generation) -> Result<Vec<SignedVote<NodeState>>> {
         info!("[MBR] anti-entropy from gen {}", from_gen);
 
         let mut msgs = self
@@ -122,11 +125,11 @@ impl Membership {
         Ok(msgs)
     }
 
-    pub fn id(&self) -> NodeId {
+    pub(crate) fn id(&self) -> NodeId {
         self.consensus.id()
     }
 
-    pub fn handle_signed_vote(
+    pub(crate) fn handle_signed_vote(
         &mut self,
         signed_vote: SignedVote<NodeState>,
     ) -> Result<VoteResponse<NodeState>> {
@@ -145,25 +148,25 @@ impl Membership {
             );
 
             let decided_consensus = std::mem::replace(&mut self.consensus, next_consensus);
-            self.history.insert(vote_gen, decided_consensus);
+            let _ = self.history.insert(vote_gen, decided_consensus);
             self.gen = vote_gen
         }
 
         Ok(vote_response)
     }
 
-    pub fn sign_vote(&self, vote: Vote<NodeState>) -> Result<SignedVote<NodeState>> {
+    fn sign_vote(&self, vote: Vote<NodeState>) -> Result<SignedVote<NodeState>> {
         self.consensus.sign_vote(vote)
     }
 
-    pub fn cast_vote(
+    pub(crate) fn cast_vote(
         &mut self,
         signed_vote: SignedVote<NodeState>,
     ) -> Result<SignedVote<NodeState>> {
         self.consensus.cast_vote(signed_vote)
     }
 
-    pub fn validate_proposals(&self, signed_vote: &SignedVote<NodeState>) -> Result<()> {
+    fn validate_proposals(&self, signed_vote: &SignedVote<NodeState>) -> Result<()> {
         // ensure we have a consensus instance for this votes generations
         let _ = self.consensus_at_gen(signed_vote.vote.gen)?;
 
@@ -173,9 +176,9 @@ impl Membership {
             .try_for_each(|reconfig| self.validate_node_state(reconfig, signed_vote.vote.gen))
     }
 
-    pub fn validate_node_state(&self, node_state: NodeState, gen: Generation) -> Result<()> {
+    fn validate_node_state(&self, node_state: NodeState, gen: Generation) -> Result<()> {
         assert!(gen > 0);
-        let members = self.section_member_states(gen - 1)?;
+        let members = self.section_node_states(gen - 1)?;
         match node_state.state {
             MembershipState::Joined => {
                 if members.contains_key(&node_state.name) {
